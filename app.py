@@ -12,6 +12,57 @@ st.set_page_config(
     layout="wide"
 )
 
+def login():
+    if "logged_in" not in st.session_state:
+        st.session_state["logged_in"] = False
+
+    if "current_user" not in st.session_state:
+        st.session_state["current_user"] = ""
+
+    if st.session_state["logged_in"]:
+        return True
+
+    st.markdown(
+        """
+        <div style="
+            max-width: 520px;
+            margin: 120px auto 20px auto;
+            padding: 36px;
+            border-radius: 28px;
+            background: linear-gradient(135deg, #fff7ef 0%, #fff1f6 100%);
+            border: 1px solid rgba(230, 190, 195, 0.6);
+            box-shadow: 0 18px 42px rgba(210, 150, 160, 0.16);
+        ">
+            <div style="font-size: 34px; font-weight: 850; color: #333333;">
+                cici’s money track
+            </div>
+            <div style="font-size: 14px; color: #777777; margin-top: 8px;">
+                Login to open your own money book.
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+    username = st.text_input("Username")
+    password = st.text_input("Password", type="password")
+
+    if st.button("Login"):
+        users = st.secrets.get("users", {})
+
+        if username in users and password == users[username]:
+            st.session_state["logged_in"] = True
+            st.session_state["current_user"] = username
+            st.rerun()
+        else:
+            st.error("Wrong username or password.")
+
+    return False
+
+
+if not login():
+    st.stop()
+
 DATA_FILE = "records.csv"
 BUDGET_FILE = "budget_settings.json"
 
@@ -624,6 +675,7 @@ INCOME_CATEGORIES = ["💸 Allowance", "↩️ Refund"]
 ALL_CATEGORIES = list(EXPENSE_CATEGORIES.keys()) + INCOME_CATEGORIES
 
 COLUMNS = [
+    "username",
     "date",
     "type",
     "category",
@@ -887,6 +939,10 @@ df = load_data()
 rate, updated_time = get_live_rate()
 budget = load_budget()
 
+current_user = st.session_state["current_user"]
+
+user_df = df[df["username"] == current_user].copy()
+
 if "last_record_message" not in st.session_state:
     st.session_state["last_record_message"] = ""
 
@@ -908,12 +964,13 @@ with header_right:
         f'<div class="rate-box">1 USD ≈ {rate:.4f} CNY<br>Updated: {updated_time}</div>',
         unsafe_allow_html=True
     )
+        st.caption(f"Logged in as: {current_user}")
 
 # =========================
 # Prepare monthly data
 # =========================
 
-monthly_df = get_month_filtered_data(df, "This Month")
+monthly_df = get_month_filtered_data(user_df, "This Month")
 
 if monthly_df.empty:
     monthly_income = 0.0
@@ -999,6 +1056,7 @@ with st.container(border=True):
                 usd_amount, cny_amount = convert_amount(amount, currency, rate)
 
                 new_record = pd.DataFrame([{
+                    "username": current_user,
                     "date": record_date,
                     "type": record_type,
                     "category": category,
@@ -1056,7 +1114,7 @@ analysis_left, analysis_right = st.columns(2)
 with analysis_left:
     st.subheader("Spending Hotspots")
 
-    chart_df = get_month_filtered_data(df, "This Month")
+    chart_df = get_month_filtered_data(user_df, "This Month")
     expense_chart_df = chart_df[chart_df["type"] == "Expense"].copy()
 
     if expense_chart_df.empty:
@@ -1104,7 +1162,7 @@ with analysis_left:
 with analysis_right:
     st.subheader("Daily Spend Wave")
 
-    trend_df = get_month_filtered_data(df, "This Month")
+    trend_df = get_month_filtered_data(user_df, "This Month")
     trend_expense_df = trend_df[trend_df["type"] == "Expense"].copy()
 
     if trend_expense_df.empty:
@@ -1268,7 +1326,7 @@ with st.expander("Bank Statement", expanded=False):
     with filter_col2:
         type_filter = st.selectbox("Type", ["All", "Expense", "Income"])
 
-    filtered_df = get_month_filtered_data(df, month_filter)
+    filtered_df = get_month_filtered_data(user_df, month_filter)
 
     if type_filter != "All":
         filtered_df = filtered_df[filtered_df["type"] == type_filter]
@@ -1359,7 +1417,8 @@ with st.expander("Bank Statement", expanded=False):
             hide_index=True
         )
 
-    if st.button("Clear All Records"):
-        create_empty_data_file()
-        st.success("All records cleared.")
+    if st.button("Clear My Records"):
+        df = df[df["username"] != current_user].copy()
+        save_data(df)
+        st.success("Your records have been cleared.")
         st.rerun()
