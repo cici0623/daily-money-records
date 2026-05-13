@@ -696,8 +696,23 @@ def get_spreadsheet():
         "https://www.googleapis.com/auth/drive"
     ]
 
+    service_account_info = dict(st.secrets["gcp_service_account"])
+
+    private_key = service_account_info.get("private_key", "").strip()
+
+    private_key = private_key.replace("\\n", "\n")
+
+    if "BEGIN PRIVATE KEY" not in private_key:
+        private_key = (
+            "-----BEGIN PRIVATE KEY-----\n"
+            + private_key
+            + "\n-----END PRIVATE KEY-----\n"
+        )
+
+    service_account_info["private_key"] = private_key
+
     credentials = Credentials.from_service_account_info(
-        dict(st.secrets["gcp_service_account"]),
+        service_account_info,
         scopes=scopes
     )
 
