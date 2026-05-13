@@ -698,14 +698,43 @@ def get_spreadsheet():
 
     service_account_info = dict(st.secrets["gcp_service_account"])
 
-    private_key = service_account_info.get("private_key", "").strip()
+    private_key = str(service_account_info.get("private_key", "")).strip()
 
+    # Clean common copy-paste problems from Streamlit Secrets
     private_key = private_key.replace("\\n", "\n")
+    private_key = private_key.replace("\r", "")
+    private_key = private_key.strip()
+    private_key = private_key.strip('"')
+    private_key = private_key.strip("'")
+    private_key = private_key.strip()
 
-    if "BEGIN PRIVATE KEY" not in private_key:
+    # If the key contains BEGIN/END somewhere, keep only that PEM block
+    if "-----BEGIN PRIVATE KEY-----" in private_key:
+        start = private_key.find("-----BEGIN PRIVATE KEY-----")
+        end = private_key.find("-----END PRIVATE KEY-----")
+
+        if end != -1:
+            end = end + len("-----END PRIVATE KEY-----")
+            private_key = private_key[start:end] + "\n"
+
+    # If the secret only contains the long MIIE... body, rebuild PEM format
+    if "-----BEGIN PRIVATE KEY-----" not in private_key:
+        key_body = private_key
+        key_body = key_body.replace("-----BEGIN PRIVATE KEY-----", "")
+        key_body = key_body.replace("-----END PRIVATE KEY-----", "")
+        key_body = key_body.replace("\n", "")
+        key_body = key_body.replace(" ", "")
+        key_body = key_body.replace('"', "")
+        key_body = key_body.replace("'", "")
+        key_body = key_body.strip()
+
+        wrapped_body = "\n".join(
+            key_body[i:i + 64] for i in range(0, len(key_body), 64)
+        )
+
         private_key = (
             "-----BEGIN PRIVATE KEY-----\n"
-            + private_key
+            + wrapped_body
             + "\n-----END PRIVATE KEY-----\n"
         )
 
