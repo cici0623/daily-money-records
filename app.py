@@ -1,16 +1,21 @@
 import streamlit as st
 import pandas as pd
 import altair as alt
+import gspread
+from google.oauth2.service_account import Credentials
 from datetime import date, datetime
-import os
 import json
 import urllib.request
 
 st.set_page_config(
-    page_title="cici’s money track",
+    page_title="cici's money track",
     page_icon="💗",
     layout="wide"
 )
+
+# =========================
+# Login
+# =========================
 
 def login():
     if "logged_in" not in st.session_state:
@@ -34,7 +39,7 @@ def login():
             box-shadow: 0 18px 42px rgba(210, 150, 160, 0.16);
         ">
             <div style="font-size: 34px; font-weight: 850; color: #333333;">
-                cici’s money track
+                cici's money track
             </div>
             <div style="font-size: 14px; color: #777777; margin-top: 8px;">
                 Login to open your own money book.
@@ -63,8 +68,28 @@ def login():
 if not login():
     st.stop()
 
-DATA_FILE = "records.csv"
-BUDGET_FILE = "budget_settings.json"
+
+# =========================
+# Basic settings
+# =========================
+
+RECORD_COLUMNS = [
+    "username",
+    "date",
+    "type",
+    "category",
+    "subcategory",
+    "amount",
+    "currency",
+    "usd_amount",
+    "cny_amount",
+    "rate",
+    "note",
+    "created_at"
+]
+
+BUDGET_COLUMNS = ["username", "USD", "CNY"]
+
 
 # =========================
 # CSS
@@ -133,10 +158,6 @@ st.markdown(
         display: none;
     }
 
-    /* =========================
-       Record big container
-    ========================= */
-
     div[data-testid="stVerticalBlockBorderWrapper"]:has(.record-shell-marker) {
         background:
             radial-gradient(circle at top right, rgba(255, 211, 225, 0.72), transparent 28%),
@@ -174,10 +195,6 @@ st.markdown(
         border: none !important;
         padding: 0 !important;
     }
-
-    /* =========================
-       Character cards
-    ========================= */
 
     .character-card {
         display: flex;
@@ -390,10 +407,6 @@ st.markdown(
         align-self: flex-start;
     }
 
-    /* =========================
-       Donut cards
-    ========================= */
-
     .donut-card {
         position: relative;
         background:
@@ -497,10 +510,6 @@ st.markdown(
         margin: 12px auto 0 auto;
         opacity: 0.85;
     }
-
-    /* =========================
-       Budget big container
-    ========================= */
 
     div[data-testid="stVerticalBlockBorderWrapper"]:has(.budget-shell-marker) {
         background:
@@ -655,6 +664,7 @@ st.markdown(
     unsafe_allow_html=True
 )
 
+
 # =========================
 # Categories
 # =========================
@@ -674,20 +684,159 @@ EXPENSE_CATEGORIES = {
 INCOME_CATEGORIES = ["💸 Allowance", "↩️ Refund"]
 ALL_CATEGORIES = list(EXPENSE_CATEGORIES.keys()) + INCOME_CATEGORIES
 
-COLUMNS = [
-    "username",
-    "date",
-    "type",
-    "category",
-    "subcategory",
-    "amount",
-    "currency",
-    "usd_amount",
-    "cny_amount",
-    "rate",
-    "note",
-    "created_at"
-]
+
+# =========================
+# Google Sheets
+# =========================
+
+@st.cache_resource
+def get_spreadsheet():
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive"
+    ]
+
+    credentials = Credentials.from_service_account_info(
+        dict(st.secrets["gcp_service_account"]),
+        scopes=scopes
+    )
+
+    client = gspread.authorize(credentials)
+    return client.open_by_url(st.secrets["google_sheets"]["sheet_url"])
+
+
+def get_or_create_worksheet(sheet, title, headers):
+    try:
+        worksheet = sheet.worksheet(title)
+    except gspread.WorksheetNotFound:
+        worksheet = sheet.add_worksheet(title=title, rows=1000, cols=len(headers))
+
+    values = worksheet.get_all_values()
+
+    if not values:
+        worksheet.update([headers])
+    elif values[0] != headers:
+        worksheet.update("1:1", [headers])
+
+    return worksheet
+
+
+def get_records_worksheet():
+    sheet = get_spreadsheet()
+    return get_or_create_worksheet(sheet, "records", RECORD_COLUMNS)
+
+
+def get_budgets_worksheet():
+    sheet = get_spreadsheet()
+    return get_or_create_worksheet(sheet, "budgets", BUDGET_COLUMNS)
+
+
+def worksheet_to_df(worksheet, columns):
+    values = worksheet.get_all_values()
+
+    if len(values) <= 1:
+        return pd.DataFrame(columns=columns)
+
+    rows = values[1:]
+    cleaned_rows = []
+
+    for row in rows:
+        padded = row + [""] * (len(columns) - len(row))
+        cleaned_rows.append(padded[:len(columns)])
+
+    return pd.DataFrame(cleaned_rows, columns=columns)
+
+
+def load_data():
+    worksheet = get_records_worksheet()
+    df = worksheet_to_df(worksheet, RECORD_COLUMNS)
+
+    if not df.empty:
+        df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date
+        df["amount"] = pd.to_numeric(df["amount"], errors="coerce").fillna(0)
+        df["usd_amount"] = pd.to_numeric(df["usd_amount"], errors="coerce").fillna(0)
+        df["cny_amount"] = pd.to_numeric(df["cny_amount"], errors="coerce").fillna(0)
+        df["rate"] = pd.to_numeric(df["rate"], errors="coerce").fillna(0)
+
+    return df
+
+
+def save_data(df):
+    worksheet = get_records_worksheet()
+
+    if df.empty:
+        worksheet.clear()
+        worksheet.update([RECORD_COLUMNS])
+        return
+
+    save_df = df.copy()
+
+    for col in RECORD_COLUMNS:
+        if col not in save_df.columns:
+            save_df[col] = ""
+
+    save_df = save_df[RECORD_COLUMNS]
+    save_df = save_df.fillna("")
+    save_df["date"] = save_df["date"].astype(str)
+
+    values = [RECORD_COLUMNS] + save_df.astype(str).values.tolist()
+
+    worksheet.clear()
+    worksheet.update(values)
+
+
+def append_record(record_dict):
+    worksheet = get_records_worksheet()
+    row = []
+
+    for col in RECORD_COLUMNS:
+        value = record_dict.get(col, "")
+        if isinstance(value, date):
+            value = value.strftime("%Y-%m-%d")
+        row.append(value)
+
+    worksheet.append_row(row, value_input_option="USER_ENTERED")
+
+
+def load_budget(username):
+    worksheet = get_budgets_worksheet()
+    df = worksheet_to_df(worksheet, BUDGET_COLUMNS)
+
+    if df.empty or username not in df["username"].values:
+        default_budget = {"USD": 800.0, "CNY": 5800.0}
+        worksheet.append_row([username, default_budget["USD"], default_budget["CNY"]], value_input_option="USER_ENTERED")
+        return default_budget
+
+    user_row = df[df["username"] == username].iloc[0]
+
+    return {
+        "USD": float(user_row["USD"] or 800.0),
+        "CNY": float(user_row["CNY"] or 5800.0)
+    }
+
+
+def save_budget(username, budget_dict):
+    worksheet = get_budgets_worksheet()
+    df = worksheet_to_df(worksheet, BUDGET_COLUMNS)
+
+    if df.empty:
+        df = pd.DataFrame(columns=BUDGET_COLUMNS)
+
+    df = df[df["username"] != username].copy()
+
+    new_row = pd.DataFrame([{
+        "username": username,
+        "USD": budget_dict.get("USD", 800.0),
+        "CNY": budget_dict.get("CNY", 5800.0)
+    }])
+
+    df = pd.concat([df, new_row], ignore_index=True)
+
+    values = [BUDGET_COLUMNS] + df.astype(str).values.tolist()
+
+    worksheet.clear()
+    worksheet.update(values)
+
 
 # =========================
 # Helper functions
@@ -753,52 +902,6 @@ def clean_category_name(category):
     return str(category)
 
 
-def create_empty_data_file():
-    pd.DataFrame(columns=COLUMNS).to_csv(DATA_FILE, index=False)
-
-
-def load_data():
-    if not os.path.exists(DATA_FILE):
-        create_empty_data_file()
-
-    df = pd.read_csv(DATA_FILE)
-
-    for col in COLUMNS:
-        if col not in df.columns:
-            df[col] = ""
-
-    df = df[COLUMNS]
-
-    if not df.empty:
-        df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date
-        df["amount"] = pd.to_numeric(df["amount"], errors="coerce").fillna(0)
-        df["usd_amount"] = pd.to_numeric(df["usd_amount"], errors="coerce").fillna(0)
-        df["cny_amount"] = pd.to_numeric(df["cny_amount"], errors="coerce").fillna(0)
-        df["rate"] = pd.to_numeric(df["rate"], errors="coerce").fillna(0)
-
-    return df
-
-
-def save_data(df):
-    df.to_csv(DATA_FILE, index=False)
-
-
-def load_budget():
-    if not os.path.exists(BUDGET_FILE):
-        return {"USD": 800.0, "CNY": 5800.0}
-
-    try:
-        with open(BUDGET_FILE, "r") as file:
-            return json.load(file)
-    except json.JSONDecodeError:
-        return {"USD": 800.0, "CNY": 5800.0}
-
-
-def save_budget(budget):
-    with open(BUDGET_FILE, "w") as file:
-        json.dump(budget, file)
-
-
 def handle_budget_change():
     raw = st.session_state.get("budget_inline_input", "")
     new_budget = parse_amount(raw)
@@ -807,10 +910,11 @@ def handle_budget_change():
         st.session_state["budget_notice"] = ("error", "Please enter a valid budget.")
         return
 
+    username = st.session_state["current_user"]
     currency = st.session_state.get("budget_input_currency", "USD")
     current_rate = st.session_state.get("current_rate", 7.20)
 
-    current_budget = load_budget()
+    current_budget = load_budget(username)
     current_budget[currency] = new_budget
 
     if currency == "USD":
@@ -818,7 +922,7 @@ def handle_budget_change():
     else:
         current_budget["USD"] = new_budget / current_rate
 
-    save_budget(current_budget)
+    save_budget(username, current_budget)
 
     st.session_state["budget_notice"] = (
         "success",
@@ -935,19 +1039,26 @@ def render_dog_card():
 # Load data
 # =========================
 
-df = load_data()
-rate, updated_time = get_live_rate()
-budget = load_budget()
-
 current_user = st.session_state["current_user"]
 
-user_df = df[df["username"] == current_user].copy()
+try:
+    df = load_data()
+except Exception as e:
+    st.error("Google Sheets connection failed. Please check your Streamlit Secrets and Sheet sharing settings.")
+    st.exception(e)
+    st.stop()
+
+rate, updated_time = get_live_rate()
+budget = load_budget(current_user)
 
 if "last_record_message" not in st.session_state:
     st.session_state["last_record_message"] = ""
 
 if "budget_notice" not in st.session_state:
     st.session_state["budget_notice"] = None
+
+user_df = df[df["username"] == current_user].copy()
+
 
 # =========================
 # Header
@@ -956,15 +1067,22 @@ if "budget_notice" not in st.session_state:
 header_left, header_right = st.columns([2.1, 1])
 
 with header_left:
-    st.markdown('<div class="page-title">cici’s money track</div>', unsafe_allow_html=True)
+    st.markdown('<div class="page-title">cici&apos;s money track</div>', unsafe_allow_html=True)
 
 with header_right:
     display_currency = st.radio("Display Currency", ["USD", "CNY"], horizontal=True)
+    st.caption(f"Logged in as: {current_user}")
+
+    if st.button("Logout"):
+        st.session_state["logged_in"] = False
+        st.session_state["current_user"] = ""
+        st.rerun()
+
     st.markdown(
         f'<div class="rate-box">1 USD ≈ {rate:.4f} CNY<br>Updated: {updated_time}</div>',
         unsafe_allow_html=True
     )
-    st.caption(f"Logged in as: {current_user}")
+
 
 # =========================
 # Prepare monthly data
@@ -991,6 +1109,7 @@ income_percent = (monthly_income / money_flow * 100) if money_flow > 0 else 0
 expense_percent = (monthly_expense / money_flow * 100) if money_flow > 0 else 0
 saved_percent = (monthly_balance / monthly_income * 100) if monthly_income > 0 else 0
 saved_percent = max(0, saved_percent)
+
 
 # =========================
 # 1. Record section
@@ -1055,7 +1174,7 @@ with st.container(border=True):
             else:
                 usd_amount, cny_amount = convert_amount(amount, currency, rate)
 
-                new_record = pd.DataFrame([{
+                new_record = {
                     "username": current_user,
                     "date": record_date,
                     "type": record_type,
@@ -1068,13 +1187,12 @@ with st.container(border=True):
                     "rate": rate,
                     "note": note,
                     "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                }])
+                }
 
-                df = pd.concat([df, new_record], ignore_index=True)
-                save_data(df)
+                append_record(new_record)
 
                 display_value = format_money(
-                    get_display_amount(new_record.iloc[0], display_currency),
+                    usd_amount if display_currency == "USD" else cny_amount,
                     display_currency
                 )
 
@@ -1085,6 +1203,7 @@ with st.container(border=True):
 
                 st.toast("Recorded by the little bear", icon="🧸")
                 st.rerun()
+
 
 # =========================
 # 2. Main board
@@ -1102,6 +1221,7 @@ with d2:
 
 with d3:
     donut_card("Balance", format_money(monthly_balance, display_currency), saved_percent, "#4D96FF", "🫧", "STAYING")
+
 
 # =========================
 # 3. Visual analysis
@@ -1200,6 +1320,7 @@ with analysis_right:
         )
 
         st.altair_chart(line_chart, use_container_width=True)
+
 
 # =========================
 # 4. Monthly budget
@@ -1312,6 +1433,7 @@ if st.session_state["budget_notice"]:
         st.success(notice_text)
     else:
         st.error(notice_text)
+
 
 # =========================
 # 5. Bank statement
