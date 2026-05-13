@@ -964,7 +964,7 @@ with header_right:
         f'<div class="rate-box">1 USD ≈ {rate:.4f} CNY<br>Updated: {updated_time}</div>',
         unsafe_allow_html=True
     )
-        st.caption(f"Logged in as: {current_user}")
+    st.caption(f"Logged in as: {current_user}")
 
 # =========================
 # Prepare monthly data
